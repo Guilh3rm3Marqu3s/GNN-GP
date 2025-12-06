@@ -182,7 +182,7 @@ def setup_deap():
     # Ephemeral Constant Generator
     pset.addEphemeralConstant("RandFloat", generate_random_float, float)
 
-    # 7. Identities
+    # identities
     pset.addPrimitive(identity_index, [IndexTensor], IndexTensor, name="IdIndex")
     pset.addPrimitive(identity_int, [int], int, name="IdInt")
     
