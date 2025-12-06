@@ -1,0 +1,9 @@
+deap
+ogb
+numpy
+torch
+torchvision
+torch-geometric
+torch-scatter
+matplotlib
+networkx
