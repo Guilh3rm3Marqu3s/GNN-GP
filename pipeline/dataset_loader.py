@@ -33,7 +33,7 @@ def load_dataset(ds:str='cora'):
             
         # --- Amazon Networks ---
         elif ds_name == 'computers':
-            data = Amazon(root=path, name='Computers', transform=transform)
+            dataset = Amazon(root=path, name='Computers', transform=transform)
         elif ds_name == 'photo':
             dataset = Amazon(root=path, name='Photo', transform=transform)
         

@@ -10,13 +10,13 @@ from networkx.drawing.nx_agraph import graphviz_layout
 import numpy as np
 from deap import tools, algorithms, gp
 
-# --- Pipeline Imports ---
+# --- pipeline
 from pipeline.argparser import parse_arguments
 from pipeline.dataset_loader import load_dataset
 from pipeline.train import train_one_epoch, evaluate
 from pipeline.utils import set_seed, save_checkpoint
 
-# --- Model & GP imports ---
+# --- model and GP ---
 from gnn_models.factory import get_model_class
 from pipeline.deap_config import setup_deap 
 
@@ -25,92 +25,87 @@ def save_tree_plot(individual, filename='best_gnn_structure.png'):
     """
     Visualizes the GP tree and saves it as a PNG image.
     """
-    # 1. Extract raw structure from DEAP
+    # 1 - extract raw structure from DEAP
     nodes, edges, labels = gp.graph(individual)
     
-    # 2. Create a Directed Graph (DiGraph) using NetworkX for easier manipulation
+    # 2 - create a Directed Graph (DiGraph) using NetworkX for easier manipulation
     g = nx.DiGraph()
     g.add_nodes_from(nodes)
     g.add_edges_from(edges)
     
-    # 3. Define definitions for "Trash" (nodes to delete) and "Bridges" (nodes to contract)
+    # 3 - define definitions for "trash" (nodes to delete) and "bridges" (nodes to contract)
     
-    # Trash: Technical terminals that don't aid logical interpretation of the formula
+    # trash: technical terminals that don't aid logical interpretation of the formula
     trash_labels = ['zeros', 'dummy_float', 'dim_size', 'index'] 
     
-    # Bridges: Identity functions that just pass data through (e.g., IdIndex, IdInt)
+    # bridges: identity functions that just pass data through (e.g., IdIndex, IdInt)
     bridge_labels = ['IdIndex', 'IdInt', 'IdEdge', 'IdFloat']
 
-    # --- STEP A: Remove Trash Nodes ---
-    # We iterate over a list of nodes because we are modifying the graph during iteration
+    # --- removing trash nodes ---
+   
     for node in list(g.nodes()):
-        # Check if node has a label
+        # check if node has a label
         if node in labels:
             label = str(labels[node])
             
-            # If it's a technical node, remove it
+            # if it's a technical node, remove it
             if label in trash_labels:
                 g.remove_node(node)
             
-    # --- STEP B: Contract Bridges (Identity Bypass) ---
+    # --- contract bridges ---
     # Logic: Parent -> IdNode -> Child   ==becomes==>   Parent -> Child
-    # We repeat this loop a few times to ensure chains of identities (Id -> Id -> Id) are resolved
+    # we repeat this loop a few times to ensure chains of identities (Id -> Id -> Id) are resolved
     for _ in range(3): 
         for node in list(g.nodes()):
-            if node not in g: continue # Skip if already deleted
+            if node not in g: continue # skip if already deleted
             
             if node in labels:
                 label = str(labels[node])
                 
-                # Check if it is an Identity node
+                # check if it is an Identity node
                 if any(bridge in label for bridge in bridge_labels):
-                    preds = list(g.predecessors(node)) # Parents
-                    succs = list(g.successors(node))   # Children
+                    preds = list(g.predecessors(node)) # parents
+                    succs = list(g.successors(node))   # children
                     
-                    # If it has both parent and child, bridge them directly
+                    # if it has both parent and child, bridge them directly
                     if preds and succs:
                         for p in preds:
                             for s in succs:
                                 g.add_edge(p, s)
                     
-                    # Remove the Identity node itself
+                    # remove the identity node itself
                     g.remove_node(node)
 
-    # --- STEP C: Visual Styling & Layout ---
+    # --- visual styling & layout ---
     pos = None
     if graphviz_layout:
         try:
-            # Hierarchical layout (Dot) is best for tree structures
             pos = graphviz_layout(g, prog='dot')
         except:
-            # Fallback if Dot fails
             pos = nx.spring_layout(g)
     else:
-        # Fallback if Graphviz is not installed
         pos = nx.spring_layout(g)
 
     plt.figure(figsize=(12, 8))
     
-    # Define Color Scheme based on operation type
     color_map = []
     final_labels = {}
     
     for node in g.nodes():
-        # Get label (use '?' if missing)
         lbl = str(labels.get(node, '?'))
         final_labels[node] = lbl
         
-        # Color Logic
+        # color Logic
         if lbl.startswith('Aggr'):
-            color_map.append('#ffcccb') # Light Red (Aggregators - The Core)
+            color_map.append('#ffcccb') # light Red (Aggregators - The Core)
         elif lbl in ['inputs']:
-            color_map.append('#90ee90') # Light Green (Data Input)
+            color_map.append('#90ee90') # light Green (Data Input)
         elif 'Const' in lbl or any(c.isdigit() for c in lbl) or 'Rand' in lbl:
-            color_map.append('#add8e6') # Light Blue (Learned Constants/Numbers)
+            color_map.append('#add8e6') # light Blue (Learned Constants/Numbers)
         elif lbl in ['MulScalar', 'Add', 'Sub', 'Mul', 'Relu', 'Sigmoid', 'Neg', 'AddScalar']:
-             color_map.append('#ffe4b5') # Light Orange (Math Operations)
+             color_map.append('#ffe4b5') # light Orange (Math Operations)
         else:
-            color_map.append('#d3d3d3') # Gray (Others)
+            color_map.append('#d3d3d3') # gray (Others)
 
     # Draw the Graph
     nx.draw(g, pos, 
@@ -129,7 +124,7 @@ def save_tree_plot(individual, filename='best_gnn_structure.png'):
     plt.title("Evolved GNN Aggregation Formula", fontsize=16)
     plt.axis('off')
     output_file = os.path.join('outputs/images/',filename)
-    # Save to File
+    # save to File
     plt.savefig(output_file, dpi=300, bbox_inches='tight')
     plt.close()
     print(f"[Viz] Tree image saved to: {output_file}")
@@ -137,7 +132,7 @@ def save_tree_plot(individual, filename='best_gnn_structure.png'):
     
 def eval_wrapper(individual, toolbox, dataset, data, args, device):
     """
-    Função de Avaliação (Fitness).
+    Evaluation Function (Fitness).
     """
     # 1. Compile individuals
     try:
@@ -218,19 +213,19 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
-    # --- 1. Load data ---
+    # --- 1. load data ---
     dataset, data = load_dataset(ds=args.dataset) 
     data = data.to(device)
     
     if is_gp_model:
-        # --- 2. Setup Genetic Programming (DEAP) ---
+        # --- 2. Setup GP (DEAP) ---
         print("\n[Step 1] Configuring evolutionary algorithm...")
         
         
         # return the configured toolbox and the primitive set
         toolbox, pset = setup_deap()
         
-        # Registra a função de avaliação customizada definida acima
+        
         # register the custom evaluation function defined above
         
         toolbox.register("evaluate", eval_wrapper, 
@@ -270,7 +265,7 @@ def main():
         
         print(f"Evaluation ended. It took {evolution_time:.2f}s")
         
-        # --- Retrieve the best candidate ---
+        # --- retrieves the best candidate ---
         best_ind = hof[0]
         best_ind_str = str(best_ind)
         print(f"\nBest solution: {best_ind}")
@@ -327,7 +322,7 @@ def main():
     start_time = time.time()
     best_acc = 0.0
     
-    # Complete training loop
+    # complete training loop
     for epoch in range(1, args.gnn_epochs + 1):
         loss = train_one_epoch(model, optimizer, data, criterion)
         

@@ -83,16 +83,16 @@ def broadcast_scalar(inputs, value, dim_size):
     num_features = inputs.size(1)
     return inputs.new_full((dim_size, num_features), value)
 
-# --- node Operations (Element-wise) ---
+# --- node Operations (element-wise) ---
 
 def elt_add(a, b): return torch.add(a, b)
 def elt_sub(a, b): return torch.sub(a, b)
-def elt_mul(a, b): return torch.mul(a, b) # Powerful when combined with LinearW
+def elt_mul(a, b): return torch.mul(a, b)
 def unary_relu(x): return torch.relu(x)
 def unary_sigmoid(x): return torch.sigmoid(x)
 def unary_neg(x): return -x
 
-# --- scalar Operations (Learned Weights) ---
+# --- scalar Operations ---
 
 def node_mul_float(tensor, scalar): return torch.mul(tensor, scalar)
 def edge_mul_float(tensor, scalar): return torch.mul(tensor, scalar)
@@ -103,7 +103,7 @@ def float_sub(a, b): return a - b
 def float_mul(a, b): return a * b
 def identity_float(a): return a
 
-# --- identities & Helpers ---
+# --- identities and helpers ---
 
 def identity_index(x): return x
 def identity_int(n): return n
