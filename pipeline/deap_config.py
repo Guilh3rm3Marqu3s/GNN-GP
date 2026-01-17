@@ -2,7 +2,7 @@ import operator
 import random
 import torch
 from torch_scatter import scatter
-from torch_geometric.utils import degree
+from torch_geometric.utils import degree, softmax
 from deap import base, creator, tools, gp
 
 # ==========================================
@@ -41,8 +41,7 @@ def aggr_max(inputs, index, dim_size, zeros):
     """Max aggregation (essential for SAGE-Pool)."""
     if index.dtype != torch.long: index = index.long()
     # Usando o menor valor possível para o tipo de dado para evitar viés de zeros
-    fill_value = torch.finfo(inputs.dtype).min
-    return scatter(inputs, index, dim=0, dim_size=dim_size, reduce='max', fill_value=fill_value)
+    return scatter(inputs, index, dim=0, dim_size=dim_size, reduce='max')
 
 # --- Topology & Projection ---
 
@@ -52,23 +51,48 @@ def calc_degree(index, dim_size, inputs_ref):
     deg[deg == 0] = 1.0  # Avoid division by zero
     return deg.view(-1, 1).to(inputs_ref.device)
 
-def gen_linear_weights(inputs_ref, seed_float, dim_size):
-    """
-    Gera pesos aleatórios baseados em uma semente vinda da GP.
-    Isso garante que os pesos mudem na mutação (se a semente mudar),
-    mas permaneçam idênticos durante todo o treino do indivíduo.
-    """
-    num_features = inputs_ref.size(1)
-    # Converte o float da GP em uma semente inteira determinística
-    seed = int(abs(seed_float) * 1_000_000)
-    g = torch.Generator(device=inputs_ref.device).manual_seed(seed)
-    
-    return torch.randn((dim_size, num_features), device=inputs_ref.device, generator=g)
+
+def normalize_by_degree(node_tensor, index, dim_size):
+    deg = degree(index, dim_size, dtype=node_tensor.dtype).view(-1, 1)
+    deg_inv_sqrt = deg.pow(-0.5)
+    deg_inv_sqrt[torch.isinf(deg_inv_sqrt)] = 0
+    return node_tensor * deg_inv_sqrt
+
+
+def pow_element_wise(node_tensor, scalar):
+    # Elevar features a uma potência (ex: 2 para dar ênfase a valores altos)
+    # Proteção com abs para evitar números complexos se a base for negativa
+    return torch.pow(torch.abs(node_tensor), scalar)
 
 def broadcast_scalar(inputs, value, dim_size):
     """Creates a NodeTensor filled with a specific constant value (Global Bias)."""
     num_features = inputs.size(1)
     return inputs.new_full((dim_size, num_features), value)
+
+
+def edge_softmax(edge_tensor, index, num_nodes):
+    
+    return softmax(edge_tensor, index, num_nodes=num_nodes)
+
+
+def aggr_std(inputs, index, dim_size, zeros):
+    if index.dtype != torch.long: index = index.long()
+    
+    # 1. Calcula a Média (E[x])
+    mean = scatter(inputs, index, dim=0, dim_size=dim_size, reduce='mean')
+    
+    # 2. Calcula a Média dos Quadrados (E[x^2])
+    # Multiplicamos inputs * inputs element-wise antes de agregar
+    mean_sq = scatter(inputs * inputs, index, dim=0, dim_size=dim_size, reduce='mean')
+    
+    # 3. Calcula a Variância: Var = E[x^2] - (E[x])^2
+    var = mean_sq - (mean * mean)
+    
+    # 4. Proteção Numérica (ReLU para garantir não-negativo e Epsilon para não zerar na raiz)
+    var = torch.relu(var) + 1e-6
+    
+    # 5. Retorna Desvio Padrão
+    return torch.sqrt(var)
 
 # --- Node Operations (element-wise) ---
 
@@ -126,7 +150,6 @@ def setup_deap():
     # Structural & Projections
     pset.addPrimitive(calc_degree, [IndexTensor, int, EdgeTensor], NodeTensor, name="Degree")
     # LinearW agora recebe um float (RandFloat) para garantir estabilidade dos pesos
-    pset.addPrimitive(gen_linear_weights, [EdgeTensor, float, int], NodeTensor, name="LinearW")
     pset.addPrimitive(broadcast_scalar, [EdgeTensor, float, int], NodeTensor, name="ConstTensor")
     
     # Node Operations
@@ -145,7 +168,10 @@ def setup_deap():
     pset.addPrimitive(identity_edge, [EdgeTensor], EdgeTensor, name="IdEdge")
     pset.addPrimitive(unary_edge_relu, [EdgeTensor], EdgeTensor, name="EdgeRelu")
     pset.addPrimitive(unary_edge_neg, [EdgeTensor], EdgeTensor, name="EdgeNeg")
-    
+    pset.addPrimitive(edge_softmax, [EdgeTensor, IndexTensor, int], EdgeTensor, name="Softmax")
+    pset.addPrimitive(aggr_std, [EdgeTensor, IndexTensor, int, NodeTensor], NodeTensor, name="AggrStd")
+    pset.addPrimitive(normalize_by_degree, [NodeTensor, IndexTensor, int], NodeTensor, name="NormDegree")
+    pset.addPrimitive(pow_element_wise, [NodeTensor, float], NodeTensor, name="Pow")
     # Float Arithmetic
     pset.addPrimitive(float_add, [float, float], float, name="FAdd")
     pset.addPrimitive(float_sub, [float, float], float, name="FSub")

@@ -3,9 +3,9 @@ import re
 import torch
 import numpy as np
 
-NOME_DATASET = "cora"  
-NOME_MODELO  = "gcn_gp"   
-DIRETORIO    = "outputs/"
+NOME_DATASET = "citeseer"  
+NOME_MODELO  = "gcn_vanilla"   
+DIRETORIO    = "../outputs_experimentos/resultados_vanilla_gp_gcn_completo"
 
 def realizar_analise_estatistica():
     

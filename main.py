@@ -21,6 +21,8 @@ from gnn_models.factory import get_model_class
 from pipeline.deap_config import setup_deap 
 
 
+import traceback
+
 def save_tree_plot(individual, filename='best_gnn_structure.png'):
     """
     Visualizes the GP tree and saves it as a PNG image.
@@ -258,7 +260,7 @@ def main():
         
         
         pop, logbook = algorithms.eaSimple(pop, toolbox, cxpb=CX_PB, mutpb=MUT_PB, ngen=N_GEN, 
-                            stats=stats, halloffame=hof, verbose=False)
+                            stats=stats, halloffame=hof, verbose=True)
 
         
         end_time_gp = time.time()
