@@ -173,13 +173,13 @@ def eval_wrapper(individual, toolbox, dataset, data, args, device):
     criterion = F.nll_loss
     
     # train
-    eval_epochs = 20 
+    eval_epochs = 60 
     best_val_acc = 0.0
     
     try:
         for _ in range(eval_epochs):
             train_one_epoch(model, optimizer, data, criterion)
-            val_acc = evaluate(model, data)
+            val_acc = evaluate(model, data, mask=data.val_mask)
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
     except Exception as e:
@@ -257,14 +257,19 @@ def main():
         start_time_gp = time.time()
         
         
-        algorithms.eaSimple(pop, toolbox, cxpb=CX_PB, mutpb=MUT_PB, ngen=N_GEN, 
-                            stats=stats, halloffame=hof, verbose=True)
+        pop, logbook = algorithms.eaSimple(pop, toolbox, cxpb=CX_PB, mutpb=MUT_PB, ngen=N_GEN, 
+                            stats=stats, halloffame=hof, verbose=False)
+
         
         end_time_gp = time.time()
         evolution_time=end_time_gp - start_time_gp
         
         print(f"Evaluation ended. It took {evolution_time:.2f}s")
         
+        log_filename = f"log_gp_{args.gnn_model}_{args.dataset}_{args.seed}.csv"
+        log_path = os.path.join('outputs/logs', log_filename)
+        with open(log_path, 'w') as f:
+           f.write(str(logbook))
         # --- retrieves the best candidate ---
         best_ind = hof[0]
         best_ind_str = str(best_ind)

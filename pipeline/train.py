@@ -14,7 +14,7 @@ def train_one_epoch(model, optimizer, data, criterion):
     optimizer.step()
     return loss.item()
 
-def evaluate(model, data):
+def evaluate(model, data, mask=None):
     
     model.eval()
     
@@ -22,8 +22,12 @@ def evaluate(model, data):
         out = model(data)
         pred = out.argmax(dim=1)
         
-        correct = pred[data.test_mask] == data.y[data.test_mask]
         
-        acc = int(correct.sum()) / int(data.test_mask.sum())
+        if mask is None:
+            mask = data.test_mask
+        
+        correct = pred[mask] == data.y[mask]
+        
+        acc = int(correct.sum()) / int(mask.sum())
         
         return acc

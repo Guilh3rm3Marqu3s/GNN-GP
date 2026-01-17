@@ -89,19 +89,19 @@ class VanillaGAT(torch.nn.Module):
         self.dropout_rate = dropout_rate
         self.layers = torch.nn.ModuleList()
         
-        # Input Layer
+        # input Layer
         # concat=True means output dimension will be heads * hidden_channels
         self.layers.append(GATConv(in_channels, hidden_channels, heads=heads, concat=True))
         
-        # We need to adjust dimensions because of concatenation
+        # we need to adjust dimensions because of concatenation
         hidden_dim_concat = hidden_channels * heads
         
-        # Hidden Layers
+        # hidden Layers
         for _ in range(num_layers - 2):
             self.layers.append(GATConv(hidden_dim_concat, hidden_channels, heads=heads, concat=True))
             
-        # Output Layer
-        # Usually concat=False for the last layer to average heads and match out_channels
+        # output Layer
+        # usually concat=False for the last layer to average heads and match out_channels
         self.layers.append(GATConv(hidden_dim_concat, out_channels, heads=1, concat=False))
 
     def forward(self, data):

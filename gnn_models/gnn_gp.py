@@ -248,24 +248,23 @@ class SAGE_GP(torch.nn.Module):
 
 class GP_GATConv(MessagePassing):
     """
-    Custom GAT Layer with GP Aggregation.
+    Custom Graph Attention (GAT) Layer with GP-based Aggregation.
     
-    Logic:
-    1. Calculate attention coefficients (alpha) based on features.
-    2. Message = alpha * features (weighted message).
-    3. Aggregate messages using GP function.
+    The aggregation step is replaced by an evolved GP function.
+    Logic: Output = Linear(Aggr_GP( Weighted_Messages )) + Bias
     """
     def __init__(self, in_channels, out_channels, aggr_func=None):
+        # We set aggr=None because the GP function handles the aggregation logic
         super().__init__(aggr=None, flow='source_to_target')
         
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.aggr_func = aggr_func
         
-        # linear transformation
+        # Standard GAT linear transformation for node features
         self.lin = Linear(in_channels, out_channels, bias=False)
         
-        # attention mechanism parameters (source and target)
+        # Learnable attention parameters for source and target nodes
         self.att_src = torch.nn.Parameter(torch.Tensor(1, out_channels))
         self.att_dst = torch.nn.Parameter(torch.Tensor(1, out_channels))
         
@@ -279,19 +278,20 @@ class GP_GATConv(MessagePassing):
         self.bias.data.zero_()
 
     def forward(self, x, edge_index):
-        # add self-loops (GAT usually requires self-loops)
+        # 1. Add self-loops to ensure nodes consider their own features
         edge_index, _ = add_remaining_self_loops(edge_index, num_nodes=x.size(0))
 
-        # linear transformation
+        # 2. Project input features
         x = self.lin(x)
         
-        # compute attention alpha 
-        # alpha_src: [N, 1], alpha_dst: [N, 1]
-        alpha_src = (x * self.att_src).sum(dim=-1)
-        alpha_dst = (x * self.att_dst).sum(dim=-1)
+        # 3. Compute attention scores
+        # We use keepdim=True to ensure the shape is [N, 1] instead of [N]
+        # This prevents internal PyG errors in the propagate/collection phase
+        alpha_src = (x * self.att_src).sum(dim=-1, keepdim=True)
+        alpha_dst = (x * self.att_dst).sum(dim=-1, keepdim=True)
 
-        # propagate
-        # pass x and the attention scores to propagate
+        # 4. Propagate
+        # PyG will automatically map alpha_src to alpha_src_i and alpha_dst to alpha_dst_j
         out = self.propagate(edge_index, x=x, alpha_src=alpha_src, alpha_dst=alpha_dst)
 
         if self.bias is not None:
@@ -301,69 +301,93 @@ class GP_GATConv(MessagePassing):
 
     def message(self, x_j, alpha_src_i, alpha_dst_j, index, ptr, size_i):
         """
-        Calculates the attention weights and applies them to messages.
+        Calculates normalized attention weights and applies them to messages.
         """
-        # calculate unnormalized attention score: LeakyReLU(a^T [Wh_i || Wh_j])
-        # sum trick: (a_src * Wh_i) + (a_dst * Wh_j)
+        # Since we used keepdim=True, alpha_src_i and alpha_dst_j are now [E, 1]
         alpha = alpha_src_i + alpha_dst_j
         alpha = F.leaky_relu(alpha, 0.2)
         
-        # normalize using softmax over neighbors
+        # Softmax normalization
         alpha = softmax(alpha, index, ptr, size_i)
         
-        # apply dropout to attention coefficients (common regularization in GAT)
+        # Dropout
         alpha = F.dropout(alpha, p=0.6, training=self.training)
         
-        # the message is the neighbor feature weighted by attention
-        return x_j * alpha.view(-1, 1)
+        # Weighted message (Both are [E, F] and [E, 1], so broadcasting works)
+        return x_j * alpha
 
     def aggregate(self, inputs, index, ptr=None, dim_size=None):
         """
-        GP Aggregation.
-        'inputs' here are already weighted by attention (x_j * alpha).
-        The GP decides how to combine these weighted messages.
+        Genetic Programming Aggregation.
+        'inputs' are messages already weighted by the attention mechanism.
         """
         if self.aggr_func is not None:
             if dim_size is None:
                 dim_size = int(index.max()) + 1
             
-            # arguments for GP Tree signature
+            # Terminal 'zeros' required by the GP tree signature for type safety
             zeros = inputs.new_zeros((dim_size, inputs.size(1)))
            
+            # Execute the evolved GP function
+            out = self.aggr_func(inputs, index, dim_size, zeros)
+
+            # --- DIMENSION SAFEGUARDS ---
+            # If the GP tree flattens the output to 1D, restore the 2D shape [N, 1]
+            if out.dim() == 1:
+                out = out.unsqueeze(-1)
             
-            return self.aggr_func(inputs, index, dim_size, zeros)
+            # If the GP output column count doesn't match the layer expectation, 
+            # expand the tensor to prevent matrix multiplication errors.
+            if out.size(1) != inputs.size(1):
+                out = out.expand(-1, inputs.size(1))
+            
+            return out
         else:
             raise Exception('GP_GATConv: No custom aggregation function passed.')
 
 
 class GAT_GP(torch.nn.Module):
+    """
+    Standard GAT Model architecture that integrates the custom GP_GATConv layer.
+    """
     def __init__(self, in_channels, hidden_channels, out_channels, num_layers, aggr_func, dropout_rate=0.5):
         super().__init__()
         self.dropout_rate = dropout_rate
         self.aggr_func = aggr_func
         self.layers = ModuleList()
         
-        # using Single-Head attention for GP compatibility simplicity
+        # Build the network stack
         if num_layers == 1:
             self.layers.append(GP_GATConv(in_channels, out_channels, aggr_func=self.aggr_func))
         else:
+            # Input Layer
             self.layers.append(GP_GATConv(in_channels, hidden_channels, aggr_func=self.aggr_func))
+            # Hidden Layers
             for _ in range(num_layers - 2):
                 self.layers.append(GP_GATConv(hidden_channels, hidden_channels, aggr_func=self.aggr_func))
+            # Output Layer
             self.layers.append(GP_GATConv(hidden_channels, out_channels, aggr_func=self.aggr_func))
             
         self.dropout = Dropout(p=self.dropout_rate, inplace=False)
         
     def forward(self, data):
         x, edge_index = data.x, data.edge_index
+        
+        # Apply layers with ELU activation (standard for GAT) and Dropout
         for layer in self.layers[:-1]:
             x = layer(x, edge_index)
-            x = F.elu(x) # ELU is standard for GAT
+            x = F.elu(x)
             x = self.dropout(x)
+        
+        # Final layer (no activation here, log_softmax follows)
         x = self.layers[-1](x, edge_index)
+
+        # --- FINAL DIMENSION CHECK ---
+        # Ensure the final tensor is 2D [N, Classes] to avoid LogSoftmax errors
+        if x.dim() == 1:
+            x = x.unsqueeze(1)
+
         return F.log_softmax(x, dim=1)
-
-
 # ======================================
 #               GIN
 # ======================================

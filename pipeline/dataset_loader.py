@@ -16,7 +16,19 @@ def load_dataset(ds:str='cora'):
     ds_name = ds.lower()
     root = '../data/'
     path = os.path.join(root,ds_name)
-    transform = T.NormalizeFeatures()
+    
+    transforms_list = [T.NormalizeFeatures()]
+    
+    if ds_name not in ['cora', 'citeseer', 'pubmed']:
+        transforms_list.append(T.RandomNodeSplit(
+            split='train_rest',
+            num_val=0.2,
+            num_test=0.2
+        ))
+        
+    transform = T.Compose(transforms_list)
+    
+    
     try:
         dataset = None
         # --- Citation Networks (Planetoid) ---
