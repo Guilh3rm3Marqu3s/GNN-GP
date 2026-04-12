@@ -216,3 +216,5 @@ myenv/
 .vscode/
 experiments/
 *.zip
+
+*.DS_Store
