@@ -131,7 +131,7 @@ def run_split(split_idx, args, device):
     
     if is_gp_model:
         print(f"\n[Split {split_idx} - Step 1] Running GP Evolution...")
-        toolbox, pset, ctx = setup_deap()
+        toolbox, pset, ctx = setup_deap(args)
         toolbox.register("evaluate", eval_wrapper, toolbox=toolbox, ctx=ctx,
                          dataset=dataset, data=data, args=args, device=device)
 

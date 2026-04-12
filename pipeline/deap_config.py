@@ -149,7 +149,7 @@ def mutate_scalars(individual: gp.PrimitiveTree):
 
 # Setup
 
-def setup_deap():
+def setup_deap(args):
     pset = make_pset()
 
     if not hasattr(creator, "FitnessMax"):
@@ -158,11 +158,11 @@ def setup_deap():
         creator.create("Individual", gp.PrimitiveTree, fitness=creator.FitnessMax)
 
     toolbox = base.Toolbox()
-    toolbox.register("expr",  gp.genHalfAndHalf, pset=pset, min_=2, max_=8)
+    toolbox.register("expr",  gp.genHalfAndHalf, pset=pset, min_=2, max_=args.gp_max_depth)
     toolbox.register("individual", tools.initIterate, creator.Individual, toolbox.expr)
     toolbox.register("population", tools.initRepeat, list, toolbox.individual)
     toolbox.register("compile", gp.compile, pset=pset)
-    toolbox.register("select", tools.selTournament, tournsize=3)
+    toolbox.register("select", tools.selTournament, tournsize=args.gp_tourn_size)
     toolbox.register("mate", gp.cxOnePointLeafBiased, termpb=0.1)
     toolbox.register("mutate_structure", gp.mutUniform, expr=toolbox.expr, pset=pset)
     toolbox.register("mutate_scalars", mutate_scalars)

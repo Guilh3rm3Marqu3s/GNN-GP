@@ -129,7 +129,7 @@ def parse_arguments() -> None:
     gp_group.add_argument(
         '--gp_max_depth', 
         type=int, 
-        default=5,
+        default=8,
         help="Maximum tree depth for GP individuals during initialization and mutation."
     )
     
