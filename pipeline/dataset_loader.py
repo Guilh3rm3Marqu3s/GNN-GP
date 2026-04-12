@@ -21,6 +21,7 @@ import torch_geometric.transforms as T
 #   'planetoid'  — Yang et al. (2016) single public split.
 #                  20 nodes/class train | 500 val | 1000 test.
 #                  Refs: Kipf & Welling (2017), Velicković et al. (2018).
+
 #   'shchur'     — Shchur et al. (2018) "Pitfalls of GNN Evaluation".
 #                  20 nodes/class train | 30 nodes/class val | rest test.
 #                  split_idx is used as the RNG seed, giving independent
@@ -28,7 +29,7 @@ import torch_geometric.transforms as T
 #
 #
 #   'geom_gcn'   — Pei et al. (2020) Geom-GCN.
-#                  10 pre-generated splits, 48% train / 32% val / 20% test,
+#                  10 pre-generated splits, 60% train / 20% val / 20% test,
 #                  stratified by class. split_idx selects one of the 10 splits.
 #                  Refs: H2GCN (2020), GPR-GNN (2021), and virtually all
 #                  heterophily papers since.
@@ -245,7 +246,7 @@ def load_dataset(ds: str = 'cora', split_idx: int = 0):
             data = dataset[0]
 
        
-        # Geom-GCN — 10 pre-generated splits (48 / 32 / 20 %)
+        # Geom-GCN — 10 pre-generated splits (60 / 20 / 20 %)
         elif protocol == 'geom_gcn':
             DatasetClass = config['class']
             if name_arg:
@@ -293,8 +294,8 @@ def load_dataset(ds: str = 'cora', split_idx: int = 0):
 
         _desc = {
             'planetoid': "public split — Yang et al. (2016)",
-            'geom_gcn': f"Geom-GCN split {split_idx % GEOM_GCN_NUM_SPLITS} — Pei et al. (2020) [48/32/20%]",
-            'geom_gcn_filtered':  f"filtered split {split_idx % GEOM_GCN_NUM_SPLITS} — Platonov et al. (2023) [48/32/20%]",
+            'geom_gcn': f"Geom-GCN split {split_idx % GEOM_GCN_NUM_SPLITS} — Pei et al. (2020) [60/20/20%]",
+            'geom_gcn_filtered':  f"filtered split {split_idx % GEOM_GCN_NUM_SPLITS} — Platonov et al. (2023) [60/20/20%]",
             'shchur':  f"Shchur et al. (2018) — seed {split_idx} [20 train/class, 30 val/class]",
         }[protocol]
 
