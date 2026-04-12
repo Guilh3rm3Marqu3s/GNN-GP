@@ -31,8 +31,7 @@ import torch_geometric.transforms as T
 #   'geom_gcn'   — Pei et al. (2020) Geom-GCN.
 #                  10 pre-generated splits, 60% train / 20% val / 20% test,
 #                  stratified by class. split_idx selects one of the 10 splits.
-#                  Refs: H2GCN (2020), GPR-GNN (2021), and virtually all
-#                  heterophily papers since.
+#                  
 #
 #   'geom_gcn_filtered' — Same Geom-GCN protocol but using the duplicate-free
 #                  versions of Chameleon and Squirrel released by
