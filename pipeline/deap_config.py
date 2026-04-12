@@ -1,211 +1,195 @@
-import operator
-import random
+from deap import gp, creator, base, tools
 import torch
-from torch_scatter import scatter
-from torch_geometric.utils import degree, softmax
-from deap import base, creator, tools, gp
+import random
+import copy
+from torch_geometric.utils import scatter
 
-# ==========================================
-#          TYPE DEFINITIONS
-# ==========================================
 
-class EdgeTensor:
-    """Features on the edges (Messages). Shape: [E, F]"""
+class NeighborTensor:
+    # Pre-reduction space [N, D].
+    def __init__(self, x_j: torch.Tensor, x_i: torch.Tensor, index: torch.Tensor, dim_size: int):
+        self.x_j = x_j
+        self.x_i = x_i
+        self.index = index
+        self.dim_size = dim_size
+
+    @classmethod
+    def from_message(cls, x_j, x_i, index, dim_size) -> "NeighborTensor":
+        return cls(x_j.clone(), x_i.clone(), index, dim_size)
+
+
+class AggTensor:
+    # Post-reduction space [B, D].
+    def __init__(self, data: torch.Tensor):
+        self.data = data
+
+    def apply(self, fn) -> "AggTensor":
+        return AggTensor(fn(self.data))
+
+    def binary(self, other: "AggTensor", fn) -> "AggTensor":
+        return AggTensor(fn(self.data, other.data))
+
+
+class ScalarValue(float):
     pass
 
-class NodeTensor:
-    """Aggregated features on the nodes. Shape: [N, F]"""
-    pass
 
-class IndexTensor:
-    """Connectivity (Edge Indices). Shape: [2, E]"""
-    pass
+# Ephemeral samplers
 
-# ==========================================
-#          PRIMITIVE FUNCTIONS
-# ==========================================
-
-# --- Aggregators ---
-
-def aggr_add(inputs, index, dim_size, zeros):
-    """Sum aggregation (essential for GIN, GAT)."""
-    if index.dtype != torch.long: index = index.long()
-    return scatter(inputs, index, dim=0, dim_size=dim_size, reduce='add')
-
-def aggr_mean(inputs, index, dim_size, zeros):
-    """Mean aggregation (essential for GCN)."""
-    if index.dtype != torch.long: index = index.long()
-    return scatter(inputs, index, dim=0, dim_size=dim_size, reduce='mean')
-
-def aggr_max(inputs, index, dim_size, zeros):
-    """Max aggregation (essential for SAGE-Pool)."""
-    if index.dtype != torch.long: index = index.long()
-    # Usando o menor valor possível para o tipo de dado para evitar viés de zeros
-    return scatter(inputs, index, dim=0, dim_size=dim_size, reduce='max')
-
-# --- Topology & Projection ---
-
-def calc_degree(index, dim_size, inputs_ref):
-    """Computes the degree of each node for structural normalization."""
-    deg = degree(index, dim_size, dtype=torch.float)
-    deg[deg == 0] = 1.0  # Avoid division by zero
-    return deg.view(-1, 1).to(inputs_ref.device)
+def sample_scalar(lo: float = 0.5, hi: float = 4.0) -> ScalarValue:
+    return ScalarValue(random.uniform(lo, hi))
 
 
-def normalize_by_degree(node_tensor, index, dim_size):
-    deg = degree(index, dim_size, dtype=node_tensor.dtype).view(-1, 1)
-    deg_inv_sqrt = deg.pow(-0.5)
-    deg_inv_sqrt[torch.isinf(deg_inv_sqrt)] = 0
-    return node_tensor * deg_inv_sqrt
+# NeighborTensor transforms (stay in [N, D])
+
+def _nb_transform(nb: NeighborTensor, fn) -> NeighborTensor:
+    return NeighborTensor(fn(nb.x_i, nb.x_j), nb.x_i, nb.index, nb.dim_size)
+
+def nb_contrast(nb: NeighborTensor) -> NeighborTensor:
+    return _nb_transform(nb, lambda xi, xj: xi - xj)
+
+def nb_similarity(nb: NeighborTensor) -> NeighborTensor:
+    return _nb_transform(nb, lambda xi, xj: xi * xj)
+
+def nb_gate(nb: NeighborTensor) -> NeighborTensor:
+    return _nb_transform(nb, lambda xi, xj: torch.sigmoid(xi) * xj)
+
+def nb_abs_diff(nb: NeighborTensor) -> NeighborTensor:
+    return _nb_transform(nb, lambda xi, xj: torch.abs(xi - xj))
+
+def nb_relu_diff(nb: NeighborTensor) -> NeighborTensor:
+    return _nb_transform(nb, lambda xi, xj: torch.relu(xj - xi))
 
 
-def pow_element_wise(node_tensor, scalar):
-    # Elevar features a uma potência (ex: 2 para dar ênfase a valores altos)
-    # Proteção com abs para evitar números complexos se a base for negativa
-    return torch.pow(torch.abs(node_tensor), scalar)
+# Reductions: NeighborTensor -> AggTensor 
 
-def broadcast_scalar(inputs, value, dim_size):
-    """Creates a NodeTensor filled with a specific constant value (Global Bias)."""
-    num_features = inputs.size(1)
-    return inputs.new_full((dim_size, num_features), value)
+def _scatter(nb: NeighborTensor, reduce: str) -> AggTensor:
+    return AggTensor(scatter(nb.x_j, nb.index, dim=0, dim_size=nb.dim_size, reduce=reduce))
+
+def reduce_mean(nb: NeighborTensor) -> AggTensor: return _scatter(nb, "mean")
+def reduce_sum(nb: NeighborTensor) -> AggTensor: return _scatter(nb, "sum")
+def reduce_max(nb: NeighborTensor) -> AggTensor: return _scatter(nb, "max")
+
+def reduce_std(nb: NeighborTensor) -> AggTensor:
+    mean_sq = scatter(nb.x_j * nb.x_j, nb.index, dim=0, dim_size=nb.dim_size, reduce="mean")
+    sq_mean = scatter(nb.x_j, nb.index, dim=0, dim_size=nb.dim_size, reduce="mean").pow(2)
+    return AggTensor(torch.sqrt(torch.relu(mean_sq - sq_mean)))
+
+def reduce_softmax(nb: NeighborTensor) -> AggTensor:
+    # Weighted sum: weights = softmax over neighbor L1 norms.
+    norms = nb.x_j.abs().sum(dim=-1, keepdim=True)
+    exp_n = torch.exp(norms - norms.detach().max())
+    denom = scatter(exp_n, nb.index, dim=0, dim_size=nb.dim_size, reduce="sum")
+    w = exp_n / (denom[nb.index] + 1e-8)
+    return AggTensor(scatter(w * nb.x_j, nb.index, dim=0, dim_size=nb.dim_size, reduce="sum"))
 
 
-def edge_softmax(edge_tensor, index, num_nodes):
-    
-    return softmax(edge_tensor, index, num_nodes=num_nodes)
+# AggTensor ops 
+
+def agg_add(x: AggTensor, y: AggTensor) -> AggTensor: return x.binary(y, torch.add)
+def agg_mul(x: AggTensor, y: AggTensor) -> AggTensor: return x.binary(y, torch.mul)
+def agg_sin(x: AggTensor) -> AggTensor: return x.apply(torch.sin)
+def agg_cos(x: AggTensor) -> AggTensor: return x.apply(torch.cos)
+def agg_tanh(x: AggTensor) -> AggTensor: return x.apply(torch.tanh)
+def agg_relu(x: AggTensor) -> AggTensor: return x.apply(torch.relu)
+def agg_norm(x: AggTensor) -> AggTensor: return x.apply(lambda t: torch.nn.functional.normalize(t, dim=-1))
+def agg_scale(x: AggTensor, s: ScalarValue) -> AggTensor: return x.apply(lambda t: t * float(s))
+def pass_through_scalar(s: ScalarValue) -> ScalarValue: return s
+def root_unwrap(x: AggTensor) -> torch.Tensor: return x.data
 
 
-def aggr_std(inputs, index, dim_size, zeros):
-    if index.dtype != torch.long: index = index.long()
-    
-    # 1. Calcula a Média (E[x])
-    mean = scatter(inputs, index, dim=0, dim_size=dim_size, reduce='mean')
-    
-    # 2. Calcula a Média dos Quadrados (E[x^2])
-    # Multiplicamos inputs * inputs element-wise antes de agregar
-    mean_sq = scatter(inputs * inputs, index, dim=0, dim_size=dim_size, reduce='mean')
-    
-    # 3. Calcula a Variância: Var = E[x^2] - (E[x])^2
-    var = mean_sq - (mean * mean)
-    
-    # 4. Proteção Numérica (ReLU para garantir não-negativo e Epsilon para não zerar na raiz)
-    var = torch.relu(var) + 1e-6
-    
-    # 5. Retorna Desvio Padrão
-    return torch.sqrt(var)
+# PrimitiveSet
 
-# --- Node Operations (element-wise) ---
+def make_pset() -> gp.PrimitiveSetTyped:
+    pset = gp.PrimitiveSetTyped("AGG", [NeighborTensor, AggTensor], torch.Tensor)
+    pset.renameArguments(ARG0="nb", ARG1="default_agg")
 
-def elt_add(a, b): return torch.add(a, b)
-def elt_sub(a, b): return torch.sub(a, b)
-def elt_mul(a, b): return torch.mul(a, b)
-def unary_relu(x): return torch.relu(x)
-def unary_sigmoid(x): return torch.sigmoid(x)
-def unary_neg(x): return -x
+    pset.addEphemeralConstant("scalar", sample_scalar, ret_type=ScalarValue)
 
-# --- Scalar Operations ---
+    # Transforms
+    pset.addPrimitive(nb_contrast, [NeighborTensor], NeighborTensor, name="Contrast")
+    pset.addPrimitive(nb_similarity, [NeighborTensor], NeighborTensor, name="Sim")
+    pset.addPrimitive(nb_gate, [NeighborTensor], NeighborTensor, name="Gate")
+    pset.addPrimitive(nb_abs_diff, [NeighborTensor], NeighborTensor, name="AbsDiff")
+    pset.addPrimitive(nb_relu_diff, [NeighborTensor], NeighborTensor, name="ReluDiff")
 
-def node_mul_float(tensor, scalar): return torch.mul(tensor, scalar)
-def edge_mul_float(tensor, scalar): return torch.mul(tensor, scalar)
+    # Reductions
+    pset.addPrimitive(reduce_mean, [NeighborTensor], AggTensor, name="Mean")
+    pset.addPrimitive(reduce_sum, [NeighborTensor], AggTensor, name="Sum")
+    pset.addPrimitive(reduce_max, [NeighborTensor], AggTensor, name="Max")
+    pset.addPrimitive(reduce_std, [NeighborTensor], AggTensor, name="Std")
+    pset.addPrimitive(reduce_softmax, [NeighborTensor], AggTensor, name="SoftmaxSum")
 
-def float_add(a, b): return a + b
-def float_sub(a, b): return a - b
-def float_mul(a, b): return a * b
-def identity_float(a): return a
+    # Post-reduction ops
+    pset.addPrimitive(agg_add, [AggTensor, AggTensor], AggTensor, name="Add")
+    pset.addPrimitive(agg_mul, [AggTensor, AggTensor], AggTensor, name="Mul")
+    pset.addPrimitive(agg_sin, [AggTensor], AggTensor, name="Sin")
+    pset.addPrimitive(agg_cos, [AggTensor], AggTensor, name="Cos")
+    pset.addPrimitive(agg_tanh, [AggTensor], AggTensor, name="Tanh")
+    pset.addPrimitive(agg_relu, [AggTensor], AggTensor, name="ReLU")
+    pset.addPrimitive(agg_norm, [AggTensor], AggTensor, name="Norm")
+    pset.addPrimitive(agg_scale, [AggTensor, ScalarValue], AggTensor, name="Scale")
+    pset.addPrimitive(pass_through_scalar, [ScalarValue], ScalarValue, name="Id_scalar")
 
-# --- Identities and Helpers ---
+    # Root
+    pset.addPrimitive(root_unwrap, [AggTensor], torch.Tensor, name="Out")
 
-def identity_index(x): return x
-def identity_int(n): return n
-def identity_edge(x): return x
-def unary_edge_relu(x): return torch.relu(x)
-def unary_edge_neg(x): return -x
+    return pset
 
-def generate_random_float():
-    """Generates a random float for Ephemeral Constants."""
-    return random.uniform(-1, 1)
 
-# ==========================================
-#          DEAP CONFIGURATION
-# ==========================================
+#  Mutation 
+
+def mutate_scalars(individual: gp.PrimitiveTree, indpb: float = 0.3):
+    for i, node in enumerate(individual):
+        if isinstance(node, gp.Terminal) and isinstance(node.value, ScalarValue):
+            if random.random() < indpb:
+                individual[i] = copy.deepcopy(node)
+                individual[i].value = sample_scalar()
+    return (individual,)
+
+
+# Setup
 
 def setup_deap():
-    # ARG0: EdgeTensor, ARG1: IndexTensor, ARG2: int (num_nodes), ARG3: NodeTensor (zeros)
-    pset = gp.PrimitiveSetTyped("MAIN", 
-                                [EdgeTensor, IndexTensor, int, NodeTensor], 
-                                NodeTensor)
-    
-    pset.renameArguments(ARG0='inputs')
-    pset.renameArguments(ARG1='index')
-    pset.renameArguments(ARG2='dim_size')
-    pset.renameArguments(ARG3='zeros') 
-    
-    # --- Register Primitives ---
-    
-    # Aggregators
-    pset.addPrimitive(aggr_add, [EdgeTensor, IndexTensor, int, NodeTensor], NodeTensor, name="AggrAdd")
-    pset.addPrimitive(aggr_mean, [EdgeTensor, IndexTensor, int, NodeTensor], NodeTensor, name="AggrMean")
-    pset.addPrimitive(aggr_max, [EdgeTensor, IndexTensor, int, NodeTensor], NodeTensor, name="AggrMax")
-    
-    # Structural & Projections
-    pset.addPrimitive(calc_degree, [IndexTensor, int, EdgeTensor], NodeTensor, name="Degree")
-    # LinearW agora recebe um float (RandFloat) para garantir estabilidade dos pesos
-    pset.addPrimitive(broadcast_scalar, [EdgeTensor, float, int], NodeTensor, name="ConstTensor")
-    
-    # Node Operations
-    pset.addPrimitive(elt_add, [NodeTensor, NodeTensor], NodeTensor, name="Add")
-    pset.addPrimitive(elt_sub, [NodeTensor, NodeTensor], NodeTensor, name="Sub")
-    pset.addPrimitive(elt_mul, [NodeTensor, NodeTensor], NodeTensor, name="Mul")
-    pset.addPrimitive(unary_relu, [NodeTensor], NodeTensor, name="Relu")
-    pset.addPrimitive(unary_sigmoid, [NodeTensor], NodeTensor, name="Sigmoid")
-    pset.addPrimitive(unary_neg, [NodeTensor], NodeTensor, name="Neg")
-    
-    # Hybrid/Scalar Ops
-    pset.addPrimitive(node_mul_float, [NodeTensor, float], NodeTensor, name="MulScalar")
-    pset.addPrimitive(edge_mul_float, [EdgeTensor, float], EdgeTensor, name="EdgeMulScalar")
-    
-    # Edge Ops
-    pset.addPrimitive(identity_edge, [EdgeTensor], EdgeTensor, name="IdEdge")
-    pset.addPrimitive(unary_edge_relu, [EdgeTensor], EdgeTensor, name="EdgeRelu")
-    pset.addPrimitive(unary_edge_neg, [EdgeTensor], EdgeTensor, name="EdgeNeg")
-    pset.addPrimitive(edge_softmax, [EdgeTensor, IndexTensor, int], EdgeTensor, name="Softmax")
-    pset.addPrimitive(aggr_std, [EdgeTensor, IndexTensor, int, NodeTensor], NodeTensor, name="AggrStd")
-    pset.addPrimitive(normalize_by_degree, [NodeTensor, IndexTensor, int], NodeTensor, name="NormDegree")
-    pset.addPrimitive(pow_element_wise, [NodeTensor, float], NodeTensor, name="Pow")
-    # Float Arithmetic
-    pset.addPrimitive(float_add, [float, float], float, name="FAdd")
-    pset.addPrimitive(float_sub, [float, float], float, name="FSub")
-    pset.addPrimitive(float_mul, [float, float], float, name="FMul")
-    pset.addPrimitive(identity_float, [float], float, name="IdFloat")
-    
-    # Ephemeral Constants
-    pset.addEphemeralConstant("RandFloat", generate_random_float, float)
+    pset = make_pset()
 
-    # Type Connectors (Identities)
-    pset.addPrimitive(identity_index, [IndexTensor], IndexTensor, name="IdIndex")
-    pset.addPrimitive(identity_int, [int], int, name="IdInt")
-    
-    # --- DEAP Creator & Toolbox ---
     if not hasattr(creator, "FitnessMax"):
         creator.create("FitnessMax", base.Fitness, weights=(1.0,))
-    
     if not hasattr(creator, "Individual"):
         creator.create("Individual", gp.PrimitiveTree, fitness=creator.FitnessMax)
 
     toolbox = base.Toolbox()
-    
-    toolbox.register("expr", gp.genGrow, pset=pset, min_=1, max_=3)
+    toolbox.register("expr",  gp.genHalfAndHalf, pset=pset, min_=2, max_=8)
     toolbox.register("individual", tools.initIterate, creator.Individual, toolbox.expr)
     toolbox.register("population", tools.initRepeat, list, toolbox.individual)
     toolbox.register("compile", gp.compile, pset=pset)
-    
     toolbox.register("select", tools.selTournament, tournsize=3)
-    toolbox.register("mate", gp.cxOnePoint)
-    toolbox.register("expr_mut", gp.genFull, min_=0, max_=2)
-    toolbox.register("mutate", gp.mutUniform, expr=toolbox.expr_mut, pset=pset)
+    toolbox.register("mate", gp.cxOnePointLeafBiased, termpb=0.1)
+    toolbox.register("mutate_structure", gp.mutUniform, expr=toolbox.expr, pset=pset)
+    toolbox.register("mutate_scalars", mutate_scalars)
 
-    # Bloat control
-    toolbox.decorate("mate", gp.staticLimit(key=operator.attrgetter("height"), max_value=7))
-    toolbox.decorate("mutate", gp.staticLimit(key=operator.attrgetter("height"), max_value=7))
+    toolbox.decorate("mate", gp.staticLimit(key=lambda i: i.height, max_value=8))
+    toolbox.decorate("mutate_structure", gp.staticLimit(key=lambda i: i.height, max_value=8))
 
-    return toolbox, pset
+    return toolbox, pset, pset.context
+
+
+# Compile individual to aggregation function 
+
+def make_aggr_fn(individual, toolbox, ctx=None):
+    # aggr_fn(x_j, x_i, index, dim_size) -> torch.Tensor [B, D]
+    compiled = toolbox.compile(expr=individual)
+
+    def aggr_fn(x_j: torch.Tensor, x_i: torch.Tensor, index: torch.Tensor, dim_size: int) -> torch.Tensor:
+        nb = NeighborTensor.from_message(x_j, x_i, index, dim_size)
+        default_agg = reduce_mean(nb)
+        
+        return compiled(nb, default_agg)
+
+    return aggr_fn
+
+
+def custom_mutate(individual, toolbox, struct_prob: float = 0.5):
+    if random.random() < struct_prob:
+        return toolbox.mutate_structure(individual)
+    return toolbox.mutate_scalars(individual)

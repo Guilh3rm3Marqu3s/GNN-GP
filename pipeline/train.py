@@ -2,13 +2,17 @@ import torch
 
 
 
-def train_one_epoch(model, optimizer, data, criterion):
+def train_one_epoch(model, optimizer, data, criterion, set='train'):
     model.train()
     optimizer.zero_grad()
     
-    out = model(data)
+    out = model(data.x, data.edge_index)
     
-    loss = criterion(out[data.train_mask], data.y[data.train_mask])
+    if set == 'train':
+        loss = criterion(out[data.train_mask], data.y[data.train_mask])
+    elif set == 'train_val':
+        combined_mask = torch.logical_or(data.train_mask, data.val_mask)
+        loss = criterion(out[combined_mask], data.y[combined_mask])
     
     loss.backward()
     optimizer.step()
@@ -19,7 +23,7 @@ def evaluate(model, data, mask=None):
     model.eval()
     
     with torch.no_grad():
-        out = model(data)
+        out = model(data.x, data.edge_index)
         pred = out.argmax(dim=1)
         
         

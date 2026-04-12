@@ -22,12 +22,6 @@ def parse_arguments() -> None:
         help='Type of GNN model architecture to use.'
     )
     
-    #gnn_group.add_argument(
-        #'--gnn_with_gp',
-        #type=bool,
-        #default=False,
-        #help='A boolean that controls if GP will be applied in the current executation.'
-    #)
     
     gnn_group.add_argument(
         '--gnn_layers',
@@ -44,12 +38,6 @@ def parse_arguments() -> None:
 
     )
     
-    #gnn_group.add_argument(
-        #'--gnn_optimizer',
-        #type=str,
-        #default='adam',
-        #help='The GNN optimizer name'
-    #)
     
     gnn_group.add_argument(
         '--gnn_lr',
@@ -92,6 +80,12 @@ def parse_arguments() -> None:
     default='cora',
     help='The problem dataset'    
     )
+    gnn_group.add_argument(
+        '--patience',
+        type=int,
+        default=5,
+        help='GNN-EPOCHS to Early Stopping '
+    )
     
     # ------- GP (DEAP) Hyperparameters
     
@@ -112,9 +106,16 @@ def parse_arguments() -> None:
     )
     
     gp_group.add_argument(
+        '--gp_gnn_epochs',
+        type=int,
+        default=60,
+        help='Number of GNNs epochs on GP evolution'
+    )
+    
+    gp_group.add_argument(
         '--gp_cx_prob', 
         type=float, 
-        default=0.8,
+        default=0.7,
         help="Crossover probability (CXPB) for GP."
     )
     

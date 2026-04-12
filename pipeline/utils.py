@@ -2,10 +2,10 @@ import torch
 import numpy as np
 import random
 import os
-
+from torch_geometric import seed_everything
 def set_seed(seed):
     """
-    Sets the seed for all random number generators (Python, NumPy, PyTorch)
+    Set the seed for all random number generators (Python, NumPy, PyTorch)
     to ensure the experiment is strictly reproducible.
     
     Args:
@@ -34,6 +34,9 @@ def set_seed(seed):
     # set environment variable for Python hash seed
     # crucial for operations that rely on hash randomization 
     os.environ['PYTHONHASHSEED'] = str(seed)
+    
+    seed_everything(seed=seed)
+    
     
     print(f"[Utils] Global seed set to: {seed}")
 

@@ -22,10 +22,8 @@ pip install torch
 pip install torch_geometric
 pip install torch_scatter torch_sparse
 
-# 3. Install DEAP and Visualization tools
-pip install deap matplotlib networkx
-# Optional (for better tree layout):
-# pip install pygraphviz
+# 3. Install DEAP
+pip install deap
 ```
 
 

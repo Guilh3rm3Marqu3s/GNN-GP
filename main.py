@@ -1,154 +1,36 @@
 import os
+import copy
+import random
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
 import time
-import matplotlib.pyplot as plt
-import networkx as nx
-from networkx.drawing.nx_agraph import graphviz_layout
-
 import numpy as np
-from deap import tools, algorithms, gp
-
-# --- pipeline
+from deap import tools, gp
+from typing import List, Dict
+# pipeline
 from pipeline.argparser import parse_arguments
-from pipeline.dataset_loader import load_dataset
+from pipeline.dataset_loader import load_dataset, DATASET_REGISTRY
 from pipeline.train import train_one_epoch, evaluate
 from pipeline.utils import set_seed, save_checkpoint
 
-# --- model and GP ---
+# model and GP
 from gnn_models.factory import get_model_class
-from pipeline.deap_config import setup_deap 
+from pipeline.deap_config import setup_deap, make_aggr_fn, custom_mutate
 
+import gc
+import json
 
-import traceback
-
-def save_tree_plot(individual, filename='best_gnn_structure.png'):
-    """
-    Visualizes the GP tree and saves it as a PNG image.
-    """
-    # 1 - extract raw structure from DEAP
-    nodes, edges, labels = gp.graph(individual)
-    
-    # 2 - create a Directed Graph (DiGraph) using NetworkX for easier manipulation
-    g = nx.DiGraph()
-    g.add_nodes_from(nodes)
-    g.add_edges_from(edges)
-    
-    # 3 - define definitions for "trash" (nodes to delete) and "bridges" (nodes to contract)
-    
-    # trash: technical terminals that don't aid logical interpretation of the formula
-    trash_labels = ['zeros', 'dummy_float', 'dim_size', 'index'] 
-    
-    # bridges: identity functions that just pass data through (e.g., IdIndex, IdInt)
-    bridge_labels = ['IdIndex', 'IdInt', 'IdEdge', 'IdFloat']
-
-    # --- removing trash nodes ---
-   
-    for node in list(g.nodes()):
-        # check if node has a label
-        if node in labels:
-            label = str(labels[node])
-            
-            # if it's a technical node, remove it
-            if label in trash_labels:
-                g.remove_node(node)
-            
-    # --- contract bridges ---
-    # Logic: Parent -> IdNode -> Child   ==becomes==>   Parent -> Child
-    # we repeat this loop a few times to ensure chains of identities (Id -> Id -> Id) are resolved
-    for _ in range(3): 
-        for node in list(g.nodes()):
-            if node not in g: continue # skip if already deleted
-            
-            if node in labels:
-                label = str(labels[node])
-                
-                # check if it is an Identity node
-                if any(bridge in label for bridge in bridge_labels):
-                    preds = list(g.predecessors(node)) # parents
-                    succs = list(g.successors(node))   # children
-                    
-                    # if it has both parent and child, bridge them directly
-                    if preds and succs:
-                        for p in preds:
-                            for s in succs:
-                                g.add_edge(p, s)
-                    
-                    # remove the identity node itself
-                    g.remove_node(node)
-
-    # --- visual styling & layout ---
-    pos = None
-    if graphviz_layout:
-        try:
-            pos = graphviz_layout(g, prog='dot')
-        except:
-            pos = nx.spring_layout(g)
-    else:
-        pos = nx.spring_layout(g)
-
-    plt.figure(figsize=(12, 8))
-    
-    color_map = []
-    final_labels = {}
-    
-    for node in g.nodes():
-        lbl = str(labels.get(node, '?'))
-        final_labels[node] = lbl
-        
-        # color Logic
-        if lbl.startswith('Aggr'):
-            color_map.append('#ffcccb') # light Red (Aggregators - The Core)
-        elif lbl in ['inputs']:
-            color_map.append('#90ee90') # light Green (Data Input)
-        elif 'Const' in lbl or any(c.isdigit() for c in lbl) or 'Rand' in lbl:
-            color_map.append('#add8e6') # light Blue (Learned Constants/Numbers)
-        elif lbl in ['MulScalar', 'Add', 'Sub', 'Mul', 'Relu', 'Sigmoid', 'Neg', 'AddScalar']:
-             color_map.append('#ffe4b5') # light Orange (Math Operations)
-        else:
-            color_map.append('#d3d3d3') # gray (Others)
-
-    # Draw the Graph
-    nx.draw(g, pos, 
-            labels=final_labels, 
-            node_color=color_map, 
-            with_labels=True, 
-            node_size=2500, 
-            font_size=11, 
-            font_weight='bold', 
-            edge_color='gray', 
-            width=1.5,
-            arrows=True,
-            arrowstyle='-|>',
-            arrowsize=20)
-            
-    plt.title("Evolved GNN Aggregation Formula", fontsize=16)
-    plt.axis('off')
-    output_file = os.path.join('outputs/images/',filename)
-    # save to File
-    plt.savefig(output_file, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"[Viz] Tree image saved to: {output_file}")
-    
-    
-def eval_wrapper(individual, toolbox, dataset, data, args, device):
-    """
-    Evaluation Function (Fitness).
-    """
-    # 1. Compile individuals
+def eval_wrapper(individual, toolbox, ctx, dataset, data, args, device):
+    """Evaluation Function (Fitness)."""
     try:
-        func = toolbox.compile(expr=individual)
+        aggr_func = make_aggr_fn(individual, toolbox, ctx)
     except Exception as e:
-        
+        print(f"Error compiling individual: {e}") 
         return (0.0,)
 
-    # 2. Dinamicaly instantiate the model
     try:
-       
         ModelClass, is_gp = get_model_class(args.gnn_model)
-        
-        
         if not is_gp:
             print(f"Error: Trying to evolve a vanilla model with GP ({args.gnn_model}).")
             return (0.0,)
@@ -158,202 +40,233 @@ def eval_wrapper(individual, toolbox, dataset, data, args, device):
             hidden_channels=args.gnn_hidden_dim, 
             out_channels=dataset.num_classes,
             num_layers=args.gnn_layers,
-            aggr_func=func,    #
+            aggr_func=aggr_func,    
             dropout_rate=args.gnn_dropout
         ).to(device)
-        
     except Exception as e:
-        
         print(f"Model Initialization error: {e}") 
         return (0.0,)
 
-    optimizer = optim.Adam(
-        model.parameters(),
-        lr=args.gnn_lr,
-        weight_decay=args.gnn_weight_decay
-    )
+    optimizer = optim.Adam(model.parameters(), lr=args.gnn_lr, weight_decay=args.gnn_weight_decay)
     criterion = F.nll_loss
     
-    # train
-    eval_epochs = 60 
     best_val_acc = 0.0
-    
     try:
-        for _ in range(eval_epochs):
+        for _ in range(args.gp_gnn_epochs):
             train_one_epoch(model, optimizer, data, criterion)
             val_acc = evaluate(model, data, mask=data.val_mask)
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
+               
     except Exception as e:
-        
         print(f"Execution error (train): {e}")
         return (0.0,)
+    finally:
+        del model, optimizer
+        torch.cuda.empty_cache()
+        gc.collect()
         
     return (best_val_acc,)
 
+def run_evolution(pop, toolbox, ctx, n_gen, cx_pb, mut_pb, hof, stats, hof_size):
+    logbook = tools.Logbook()
+    logbook.header = ["gen", "nevals", "avg", "std", "min", "max"]
+    
+    invalid_ind = [ind for ind in pop if not ind.fitness.valid]
+    for ind in invalid_ind:
+        ind.fitness.values = toolbox.evaluate(ind)
+    hof.update(pop)
+    
+    record = stats.compile(pop)
+    logbook.record(gen=0, nevals=len(invalid_ind), **record)
+    print(logbook.stream)
+    
+    for gen in range(1, n_gen + 1):
+        offspring = toolbox.select(pop, len(pop))
+        offspring = [copy.deepcopy(ind) for ind in offspring]
+        
+        for i in range(0, len(offspring) - 1, 2):
+            if random.random() < cx_pb:
+                offspring[i], offspring[i + 1] = toolbox.mate(offspring[i], offspring[i + 1])
+                del offspring[i].fitness.values, offspring[i + 1].fitness.values
+                
+        for ind in offspring:
+            if random.random() < mut_pb:
+                ind, = custom_mutate(ind, toolbox)
+                del ind.fitness.values
+                
+        invalid_ind = [ind for ind in offspring if not ind.fitness.valid]
+        for ind in invalid_ind:
+            ind.fitness.values = toolbox.evaluate(ind)
+            
+        pop[:] = offspring
+        for i, elite in enumerate(hof[:hof_size]):
+            pop[i] = copy.deepcopy(elite)
+            
+        hof.update(pop)
+        record = stats.compile(pop)
+        logbook.record(gen=gen, nevals=len(invalid_ind), **record)
+        print(logbook.stream)
+        
+    return pop, logbook
 
-def main():
-    args = parse_arguments()
+def run_split(split_idx, args, device):
+    """Executes evolution and training for a single dataset split."""
+    print(f"\n{'='*50}\nStarting Split {split_idx}\n{'='*50}")
     
-    evolution_time = 0. #for .pth file
-    
-    # --- Reproducibility setup ---
     set_seed(args.seed)
     
-    # --- initial config ---
-    print("--- Configuration ---")
-    for key, value in vars(args).items():
-        print(f"{key:<20}: {value}")
-    print("---------------------------------")
-    
-    ModelClass, is_gp_model = get_model_class(args.gnn_model)
-    print(f"Selected model: {args.gnn_model} (GP Mode: {is_gp_model})")
-    
-    best_func = None
-    best_ind_str = 'Vanilla_Architeture' # default for vanilla
-    
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
-    
-    # --- 1. load data ---
-    dataset, data = load_dataset(ds=args.dataset) 
+    # Load dataset for the specific split
+    dataset, data = load_dataset(ds=args.dataset, split_idx=split_idx)
+    if dataset is None:
+        return 0.0 # Error loading
     data = data.to(device)
     
-    if is_gp_model:
-        # --- 2. Setup GP (DEAP) ---
-        print("\n[Step 1] Configuring evolutionary algorithm...")
-        
-        
-        # return the configured toolbox and the primitive set
-        toolbox, pset = setup_deap()
-        
-        
-        # register the custom evaluation function defined above
-        
-        toolbox.register("evaluate", eval_wrapper, 
-                        toolbox=toolbox, 
-                        dataset=dataset, 
-                        data=data, 
-                        args=args, 
-                        device=device)
+    ModelClass, is_gp_model = get_model_class(args.gnn_model)
+    evo_best_acc = "Vanilla_Architecture"
+    best_ind_str = 'Vanilla_Architecture'
+    best_func = None
 
-        # GP hyperparameters
-        POP_SIZE = args.gp_pop_size
-        N_GEN = args.gp_generations  
-        CX_PB = args.gp_cx_prob # crossover probability
-        MUT_PB = args.gp_mut_prob # mutation probability
-        
-        # population initialization
-        pop = toolbox.population(n=POP_SIZE)
-        hof = tools.HallOfFame(1) # store best tree
-        
-        # Stats
+    evolution_time = None
+    
+    if is_gp_model:
+        print(f"\n[Split {split_idx} - Step 1] Running GP Evolution...")
+        toolbox, pset, ctx = setup_deap()
+        toolbox.register("evaluate", eval_wrapper, toolbox=toolbox, ctx=ctx,
+                         dataset=dataset, data=data, args=args, device=device)
+
+        pop = toolbox.population(n=args.gp_pop_size)
+        hof = tools.HallOfFame(args.gp_hof_size)
         stats = tools.Statistics(lambda ind: ind.fitness.values)
         stats.register("avg", np.mean)
         stats.register("std", np.std)
         stats.register("min", np.min)
         stats.register("max", np.max)
         
-        # --- Evaluation ---
-        print(f"Starting evaluation: {N_GEN} generations...")
         start_time_gp = time.time()
+        pop, logbook = run_evolution(pop, toolbox, ctx, n_gen=args.gp_generations, 
+                                     cx_pb=args.gp_cx_prob, mut_pb=args.gp_mut_prob, 
+                                     hof=hof, stats=stats, hof_size=args.gp_hof_size)
+        evolution_time = time.time() - start_time_gp
         
-        
-        pop, logbook = algorithms.eaSimple(pop, toolbox, cxpb=CX_PB, mutpb=MUT_PB, ngen=N_GEN, 
-                            stats=stats, halloffame=hof, verbose=True)
-
-        
-        end_time_gp = time.time()
-        evolution_time=end_time_gp - start_time_gp
-        
-        print(f"Evaluation ended. It took {evolution_time:.2f}s")
-        
-        log_filename = f"log_gp_{args.gnn_model}_{args.dataset}_{args.seed}.csv"
-        log_path = os.path.join('outputs/logs', log_filename)
-        with open(log_path, 'w') as f:
+        log_filename = f"log_model_{args.gnn_model}_dataset_{args.dataset}_split_{split_idx}_{args.seed}.csv"
+        os.makedirs('outputs/logs', exist_ok=True)
+        with open(os.path.join('outputs/logs', log_filename), 'w') as f:
            f.write(str(logbook))
-        # --- retrieves the best candidate ---
+           
         best_ind = hof[0]
         best_ind_str = str(best_ind)
-        print(f"\nBest solution: {best_ind}")
-        print(f"Fitness: {best_ind.fitness.values[0]:.4f}")
+        print(f"Best solution for Split {split_idx}: {best_ind} (Fitness: {best_ind.fitness.values[0]:.4f})")
+        evo_best_acc = best_ind.fitness.values[0]
+        best_func = make_aggr_fn(best_ind, toolbox, ctx)
+    else:
+        print(f"\n[Split {split_idx} - Step 1] Skipped (Vanilla Model).")
 
-        # --- 3. Final train ---
-        print("\n[Step 2] Training the best solution again...")
-        
-        
-        best_func = toolbox.compile(expr=best_ind)
-        
-        # visualize tree
-        try:
-            save_tree_plot(best_ind, filename=f'tree_{args.gnn_model}_{args.dataset}_{args.seed}.png')
-        except Exception as e:
-            print(f"Could not save tree image: {e}")
-        
-    else:
-        print("\n[Step 1] Skipped (Vanilla Model selected).")
-        best_func = None
-    
-    
-    
+    print(f"\n[Split {split_idx} - Step 2] Training final model...")
     if is_gp_model:
-    # Instantiate the final model with the discovered aggregation function
-        model = ModelClass(
-            in_channels=dataset.num_node_features,
-            hidden_channels=args.gnn_hidden_dim,
-            out_channels=dataset.num_classes,
-            num_layers=args.gnn_layers,
-            aggr_func=best_func,
-            dropout_rate=args.gnn_dropout
-        ).to(device)
-        
+        model = ModelClass(in_channels=dataset.num_node_features, hidden_channels=args.gnn_hidden_dim,
+                           out_channels=dataset.num_classes, num_layers=args.gnn_layers,
+                           aggr_func=best_func, dropout_rate=args.gnn_dropout).to(device)
     else:
-        # without 'aggr_func' (Vanilla Model)
-        model = ModelClass(
-            in_channels=dataset.num_node_features,
-            hidden_channels=args.gnn_hidden_dim,
-            out_channels=dataset.num_classes,
-            num_layers=args.gnn_layers,
-            dropout_rate=args.gnn_dropout
-        ).to(device)
+        model = ModelClass(in_channels=dataset.num_node_features, hidden_channels=args.gnn_hidden_dim,
+                           out_channels=dataset.num_classes, num_layers=args.gnn_layers,
+                           dropout_rate=args.gnn_dropout).to(device)
         
-    
-    optimizer = optim.Adam(
-        model.parameters(),
-        lr=args.gnn_lr,
-        weight_decay=args.gnn_weight_decay
-    )
+    optimizer = optim.Adam(model.parameters(), lr=args.gnn_lr, weight_decay=args.gnn_weight_decay)
     criterion = F.nll_loss
     
-    print('Starting complete training...')
-    start_time = time.time()
     best_acc = 0.0
+    counter = 0
+    infos: Dict = {
+        "seed": args.seed,
+        "split_idx": split_idx,
+        "evolution_time": evolution_time,
+        "evaluation_time": None,
+        "best_ind": best_ind_str,
+        "evolution_best_acc": evo_best_acc,
+        "acc": {
+            "epoch": [],
+            "value": []
+        }
+    }
     
-    # complete training loop
+    start_time = time.time()
+    best_loss = np.inf
     for epoch in range(1, args.gnn_epochs + 1):
-        loss = train_one_epoch(model, optimizer, data, criterion)
+        loss = train_one_epoch(model, optimizer, data, criterion, set='train_val')
         
-        if epoch % 10 == 0:
-            test_acc = evaluate(model, data)
-            if test_acc > best_acc:
-                best_acc = test_acc
+        test_acc = evaluate(model, data)
+        if test_acc > best_acc:
+            infos["acc"]["epoch"].append(epoch)
+            infos["acc"]["value"].append(test_acc)
+            best_acc = test_acc
+            #save_checkpoint(
+                #model=model, best_individual_str=best_ind_str, args=args,
+                #evolution_time=evolution_time, training_time=time.time()-start_time,
+                #filename=f"checkpoint_{args.gnn_model}_{args.dataset}_split{split_idx}_ep{epoch}_{args.seed}.pth",
+                #test_acc=test_acc
+                #)
                 
-                save_checkpoint(
-                    model=model,
-                    best_individual_str=best_ind_str,
-                    args=args,
-                    evolution_time=evolution_time,
-                    training_time=time.time()-start_time,
-                    filename=f"checkpoint_{args.gnn_model}_{args.dataset}_{epoch}_{args.seed}.pth",
-                    test_acc=test_acc
-                    
-                )
-            print(f"Epoch {epoch:03d} | Loss: {loss:.4f} | Test Acc: {test_acc:.4f} | Best: {best_acc:.4f}")
+        if loss >= best_loss: 
+            counter = counter + 1
+            if counter >= args.patience:
+                break
+        else:
+            counter = 0
+            best_loss = loss
             
-    end_time = time.time()
-    print("Training ended.")
-    print(f'Total training time: {end_time-start_time:.2f}s')
-    print(f'Best final accuracy: {best_acc:.4f}')
+    evaluation_time = time.time() - start_time
+    infos["evaluation_time"] = evaluation_time
+    
+    print(f"Split {split_idx} Training ended. Best Test Acc: {best_acc:.4f}")
+    
+    # save values 
+    
+    os.makedirs("./outputs/evaluation", exist_ok=True)
+    
+    with open(f"./outputs/evaluation/model_{args.gnn_model}_dataset_{args.dataset}_{args.seed}.txt","a") as file:
+        json.dump(infos, file)
+        file.write("\n")   
+    
+    return best_acc
+
+def main():
+    args = parse_arguments()
+    set_seed(args.seed)
+    
+    print("--- Configuration ---")
+    for key, value in vars(args).items(): print(f"{key:<20}: {value}")
+    
+    ModelClass, is_gp_model = get_model_class(args.gnn_model)
+    print(f"Selected model: {args.gnn_model} (GP Mode: {is_gp_model})")
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}\n")
+    
+    ds_name = args.dataset.lower()
+    if ds_name not in DATASET_REGISTRY:
+        raise ValueError(f"Unknown dataset {args.dataset}")
+        
+    # Determine number of splits based on literature protocol
+    config = DATASET_REGISTRY[ds_name]
+    protocol = config.get('protocol', '')
+    num_splits = 1 if protocol == 'planetoid' else 10
+    
+    print(f"Running evaluation over {num_splits} split(s)...")
+    
+    split_accuracies = []
+    for split_idx in range(num_splits):
+        acc = run_split(split_idx, args, device)
+        split_accuracies.append(acc)
+        
+    print("\n" + "="*50)
+    print("FINAL RESULTS")
+    print("="*50)
+    for i, acc in enumerate(split_accuracies):
+        print(f"Split {i}: {acc:.4f}")
+        
+    mean_acc = np.mean(split_accuracies)
+    std_acc = np.std(split_accuracies)
+    print(f"\nFinal Performance: {mean_acc:.4f} ± {std_acc:.4f}")
 
 if __name__ == '__main__':
     main()
