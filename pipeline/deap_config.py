@@ -139,10 +139,9 @@ def make_pset() -> gp.PrimitiveSetTyped:
 
 #  Mutation 
 
-def mutate_scalars(individual: gp.PrimitiveTree, indpb: float = 0.3):
+def mutate_scalars(individual: gp.PrimitiveTree):
     for i, node in enumerate(individual):
         if isinstance(node, gp.Terminal) and isinstance(node.value, ScalarValue):
-            if random.random() < indpb:
                 individual[i] = copy.deepcopy(node)
                 individual[i].value = sample_scalar()
     return (individual,)
