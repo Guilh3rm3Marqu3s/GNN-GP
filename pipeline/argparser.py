@@ -18,7 +18,7 @@ def parse_arguments() -> None:
         '--gnn_model',
         type=str,
         default='gcn_gp',
-        choices=['gcn_gp', 'gcn_vanilla', 'sage_gp', 'sage_vanilla', 'gin_gp', 'gin_vanilla', 'gat_gp', 'gat_vanilla'],
+        choices=['gcn_gp', 'gcn_vanilla', 'gin_gp', 'gin_vanilla', 'gatv2_gp', 'gatv2_vanilla'],
         help='Type of GNN model architecture to use.'
     )
     

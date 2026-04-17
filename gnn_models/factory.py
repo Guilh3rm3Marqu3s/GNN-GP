@@ -1,5 +1,5 @@
-from gnn_models.gnn_gp import GCN_GP
-from gnn_models.gnn_vanilla import GCN
+from gnn_models.gnn_gp import GCN_GP, GIN_GP, GATv2_GP
+from gnn_models.gnn_vanilla import GCN, GIN, GATv2
 def get_model_class(model_name):
     """
         Input:
@@ -12,9 +12,13 @@ def get_model_class(model_name):
     mapping = {
         # GP models (evolution required)
         'gcn_gp': (GCN_GP, True),
+        'gin_gp': (GIN_GP, True),
+        'gatv2_gp': (GATv2_GP, True),
         
         # Vanilla models (Only training)
         'gcn_vanilla': (GCN, False),
+        'gin_vanilla': (GIN, False),
+        'gatv2_vanilla': (GATv2, False),
     }
     
     if name in mapping:

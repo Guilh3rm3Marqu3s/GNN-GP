@@ -10,6 +10,7 @@ from torch_geometric.datasets import (
     WikipediaNetwork,
     WebKB,
     Actor,
+    HeterophilousGraphDataset
 )
 import torch_geometric.transforms as T
 
@@ -29,7 +30,7 @@ import torch_geometric.transforms as T
 #
 #
 #   'geom_gcn'   — Pei et al. (2020) Geom-GCN.
-#                  10 pre-generated splits, 48% train / 32% val / 20% test,
+#                  10 pre-generated splits, 60% train / 20% val / 20% test,
 #                  stratified by class. split_idx selects one of the 10 splits.
 #                  
 #
@@ -64,8 +65,16 @@ DATASET_REGISTRY = {
 
     # Filtered variants (Platonov et al. 2023, duplicate-free) 
     # Use these instead of 'chameleon'/'squirrel' for leakage-free evaluation.
-    'chameleon-filtered': {'name': 'chameleon_filtered', 'protocol': 'geom_gcn_filtered'},
-    'squirrel-filtered':  {'name': 'squirrel_filtered',  'protocol': 'geom_gcn_filtered'},
+    'chameleon_filtered': {'name': 'chameleon_filtered', 'protocol': 'geom_gcn_filtered'},
+    'squirrel_filtered':  {'name': 'squirrel_filtered',  'protocol': 'geom_gcn_filtered'},
+    
+    
+    # Heterophilius
+    'roman-empire': {'class': HeterophilousGraphDataset, 'name': 'Roman-Empire', 'protocol': 'geom_gcn'},
+    'amazon-ratings': {'class': HeterophilousGraphDataset, 'name': 'Amazon-ratings', 'protocol': 'geom_gcn'},
+    'minesweeper': {'class': HeterophilousGraphDataset, 'name': 'Minesweeper', 'protocol': 'geom_gcn'},
+    'tolokers': {'class': HeterophilousGraphDataset, 'name': 'Tolokers', 'protocol': 'geom_gcn'},
+    'questions': {'class': HeterophilousGraphDataset, 'name': 'Questions', 'protocol': 'geom_gcn'},
 }
 
 GEOM_GCN_NUM_SPLITS = 10
@@ -116,8 +125,8 @@ _FILTERED_BASE_URL = (
 )
 
 _FILTERED_FILES = {
-    'chameleon_filtered': 'chameleon_filtered_directed.npz',
-    'squirrel_filtered':  'squirrel_filtered_directed.npz',
+    'chameleon_filtered': 'chameleon_filtered.npz',
+    'squirrel_filtered':  'squirrel_filtered.npz',
 }
 
 
@@ -146,12 +155,9 @@ def _load_filtered_dataset(name: str, root: str, split_idx: int, transform):
 
     x  = torch.tensor(raw['node_features'], dtype=torch.float)
     y  = torch.tensor(raw['node_labels'],  dtype=torch.long)
-    edges = torch.tensor(raw['edges'],  dtype=torch.long).t().contiguous()
+    edges = torch.tensor(raw['edges'], dtype=torch.long).t().contiguous()
 
-    # The .npz stores each undirected edge once — mirror to get both directions.
-    edges = torch.cat([edges, edges.flip(0)], dim=1)
-
-    num_splits = raw['train_masks'].shape[1]
+    num_splits = raw['train_masks'].shape[0]
     idx = split_idx % num_splits
     if split_idx >= num_splits:
         print(
@@ -159,9 +165,9 @@ def _load_filtered_dataset(name: str, root: str, split_idx: int, transform):
             f"in {name}. Using split {idx} (modulo)."
         )
 
-    train_mask = torch.tensor(raw['train_masks'][:, idx], dtype=torch.bool)
-    val_mask  = torch.tensor(raw['val_masks'][:, idx],  dtype=torch.bool)
-    test_mask  = torch.tensor(raw['test_masks'][:, idx], dtype=torch.bool)
+    train_mask = torch.tensor(raw['train_masks'][idx, :], dtype=torch.bool)
+    val_mask  = torch.tensor(raw['val_masks'][idx, :],  dtype=torch.bool)
+    test_mask  = torch.tensor(raw['test_masks'][idx, :], dtype=torch.bool)
 
     data = Data(x=x, edge_index=edges, y=y,
                 train_mask=train_mask, val_mask=val_mask, test_mask=test_mask)
@@ -172,9 +178,9 @@ def _load_filtered_dataset(name: str, root: str, split_idx: int, transform):
     # Lightweight wrapper so callers can read .num_node_features / .num_classes.
     class _Wrapper:
         def __init__(self, d):
-            self._data            = d
+            self._data  = d
             self.num_node_features = d.num_node_features
-            self.num_classes       = int(d.y.max().item()) + 1
+            self.num_classes = int(d.y.max().item()) + 1
         def __getitem__(self, _):
             return self._data
 
@@ -245,10 +251,12 @@ def load_dataset(ds: str = 'cora', split_idx: int = 0):
             data = dataset[0]
 
        
-        # Geom-GCN — 10 pre-generated splits (48 / 32 / 20 %)
+        # Geom-GCN — 10 pre-generated splits (60 / 20 / 20 %)
         elif protocol == 'geom_gcn':
             DatasetClass = config['class']
-            if name_arg:
+            if DatasetClass == HeterophilousGraphDataset:
+                dataset = DatasetClass(root=path, name=name_arg, transform=transform)
+            elif name_arg:
                 dataset = DatasetClass(root=path, name=name_arg, transform=transform)
             else:
                 dataset = DatasetClass(root=path, transform=transform)
@@ -293,8 +301,8 @@ def load_dataset(ds: str = 'cora', split_idx: int = 0):
 
         _desc = {
             'planetoid': "public split — Yang et al. (2016)",
-            'geom_gcn': f"Geom-GCN split {split_idx % GEOM_GCN_NUM_SPLITS} — Pei et al. (2020) [48/32/20%]",
-            'geom_gcn_filtered':  f"filtered split {split_idx % GEOM_GCN_NUM_SPLITS} — Platonov et al. (2023) [48/32/20%]",
+            'geom_gcn': f"Geom-GCN split {split_idx % GEOM_GCN_NUM_SPLITS} — Pei et al. (2020) [60/20/20%]",
+            'geom_gcn_filtered':  f"filtered split {split_idx % GEOM_GCN_NUM_SPLITS} — Platonov et al. (2023) [60/20/20%]",
             'shchur':  f"Shchur et al. (2018) — seed {split_idx} [20 train/class, 30 val/class]",
         }[protocol]
 

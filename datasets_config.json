@@ -142,7 +142,7 @@
         "cx_prob": 0.5,
         "mut_prob": 0.2
     },
-    "chameleon-filtered":{
+    "chameleon_filtered":{
         "embeddings_dim": 64,
         "num_layers": 2,
         "dropout":0.5,
@@ -168,7 +168,7 @@
         "cx_prob": 0.5,
         "mut_prob": 0.2
     },
-    "squirrel-filtered":{
+    "squirrel_filtered":{
         "embeddings_dim": 64,
         "num_layers": 2,
         "dropout":0.5,
@@ -186,6 +186,71 @@
         "num_layers": 2,
         "dropout":0.5,
         "LR": 0.01,
+        "weight_decay":5e-4,
+        "patience": 30,
+        "gnn_epochs": 300,
+        "gp_pop_size": 15,
+        "gp_generations": 10,
+        "cx_prob": 0.5,
+        "mut_prob": 0.2
+    },
+    "roman-empire":{
+        "embeddings_dim": 512,
+        "num_layers": 2,
+        "dropout":0.2,
+        "LR": 0.00003,
+        "weight_decay":5e-4,
+        "patience": 30,
+        "gnn_epochs": 300,
+        "gp_pop_size": 15,
+        "gp_generations": 10,
+        "cx_prob": 0.5,
+        "mut_prob": 0.2
+    },
+     "amazon-ratings":{
+        "embeddings_dim": 512,
+        "num_layers": 2,
+        "dropout":0.2,
+        "LR": 0.00003,
+        "weight_decay":5e-4,
+        "patience": 30,
+        "gnn_epochs": 300,
+        "gp_pop_size": 15,
+        "gp_generations": 10,
+        "cx_prob": 0.5,
+        "mut_prob": 0.2
+    },
+    "minesweeper":{
+        "embeddings_dim": 512,
+        "num_layers": 2,
+        "dropout":0.2,
+        "LR": 0.00003,
+        "weight_decay":5e-4,
+        "patience": 30,
+        "gnn_epochs": 300,
+        "gp_pop_size": 15,
+        "gp_generations": 10,
+        "cx_prob": 0.5,
+        "mut_prob": 0.2
+    },
+    "tolokers":{
+        "embeddings_dim": 512,
+        "num_layers": 2,
+        "dropout":0.2,
+        "LR": 0.00003,
+        "weight_decay":5e-4,
+        "patience": 30,
+        "gnn_epochs": 300,
+        "gp_pop_size": 15,
+        "gp_generations": 10,
+        "cx_prob": 0.5,
+        "mut_prob": 0.2
+    },
+    "questions":{
+        "embeddings_dim": 512,
+        "num_layers": 2,
+        "dropout":0.2,
+        "LR": 0.00003,
         "weight_decay":5e-4,
         "patience": 30,
         "gnn_epochs": 300,

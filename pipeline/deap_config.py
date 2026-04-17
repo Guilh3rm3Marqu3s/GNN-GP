@@ -167,15 +167,15 @@ def setup_deap(args):
     toolbox.register("mutate_structure", gp.mutUniform, expr=toolbox.expr, pset=pset)
     toolbox.register("mutate_scalars", mutate_scalars)
 
-    toolbox.decorate("mate", gp.staticLimit(key=lambda i: i.height, max_value=8))
-    toolbox.decorate("mutate_structure", gp.staticLimit(key=lambda i: i.height, max_value=8))
+    toolbox.decorate("mate", gp.staticLimit(key=lambda i: i.height, max_value=args.gp_max_depth))
+    toolbox.decorate("mutate_structure", gp.staticLimit(key=lambda i: i.height, max_value=args.gp_max_depth))
 
     return toolbox, pset, pset.context
 
 
 # Compile individual to aggregation function 
 
-def make_aggr_fn(individual, toolbox, ctx=None):
+def make_aggr_fn(individual, toolbox):
     # aggr_fn(x_j, x_i, index, dim_size) -> torch.Tensor [B, D]
     compiled = toolbox.compile(expr=individual)
 
