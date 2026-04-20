@@ -143,56 +143,82 @@ class GIN_GP(nn.Module):
                 x = F.relu(x)
                 x = F.dropout(x, p=self.dropout_rate, training=self.training)
         
-        return self.final_lin(x)
+        return F.log_softmax(self.final_lin(x), dim=1)
     
     
 class GATv2GPConv(MessagePassing):
-    """
-    GATv2-style layer where the attention scoring mechanism is evolved via GP.
-    """
-    def __init__(self, in_channels: int, out_channels: int, aggr_func):
-        super().__init__(aggr='add')
+    def __init__(self, in_channels: int, out_channels: int, heads: int, aggr_func, concat: bool = True):
+        super().__init__(aggr='add', node_dim=0)
         
-        self.score_fn = aggr_func 
+        self.heads = heads
+        self.out_channels = out_channels
+        self.concat = concat
+        self.score_fn = aggr_func
+
+        self.lin_l = nn.Linear(in_channels, heads * out_channels, bias=True)
+        self.lin_r = nn.Linear(in_channels, heads * out_channels, bias=False)
         
-        # Linear transformation for the actual features being passed as messages
-        self.lin = nn.Linear(in_channels, out_channels)
+        self.lin_val = nn.Linear(in_channels, heads * out_channels, bias=False)
+        
+        if concat:
+            self.bias = nn.Parameter(torch.zeros(heads * out_channels))
+        else:
+            self.bias = nn.Parameter(torch.zeros(out_channels))
 
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
-        # Pre-transform the features that will be weighted and summed
-        x_proj = self.lin(x)
+        H, C = self.heads, self.out_channels
         
-        # Pass both original features (for scoring) and projected features (for the message)
-        return self.propagate(edge_index, x=x, x_proj=x_proj)
+        edge_index, _ = add_self_loops(edge_index, num_nodes=x.size(0))
+        
+        x_l = self.lin_l(x).view(-1, H, C)
+        x_r = self.lin_r(x).view(-1, H, C)
+        
+        x_val = self.lin_val(x).view(-1, H, C)
+        
+        out = self.propagate(edge_index, x_l=x_l, x_r=x_r, x_val=x_val)
+        # out: [N, H, C]
+        
+        if self.concat:
+            out = out.view(-1, self.heads * self.out_channels)
+        else:
+            out = out.mean(dim=1)  # [N, C]
+        
+        return out + self.bias
 
-    def message(self, x_i: torch.Tensor, x_j: torch.Tensor, x_proj_j: torch.Tensor, index: torch.Tensor, ptr, size_i) -> torch.Tensor:
-       
-        # The GP function takes original features [E, in_channels] and returns a score [E, 1]
-        e = self.score_fn(x_i, x_j) 
+    def message(self, x_l_i, x_r_j, x_val_j, index, ptr, size_i):
+        # x_l_i, x_r_j, x_val_j: [E, H, C]
+
+        scores = []
+        for h in range(self.heads):
+            e_h = self.score_fn(x_l_i[:, h, :], x_r_j[:, h, :])  # [E] or [E,1]
+            scores.append(e_h.squeeze(-1))  # [E]
         
-       
-        # Important: e must be shape [E] or [E, 1]
-        alpha = softmax(e, index, ptr, size_i)
+        e = torch.stack(scores, dim=1)   # [E, H]
+        alpha = softmax(e, index, ptr, size_i)  # [E, H]
         
-        # Weight the transformed neighbor features
-        return x_proj_j * alpha.view(-1, 1)
+        return x_val_j * alpha.unsqueeze(-1)    # [E, H, C]
 
 class GATv2_GP(nn.Module):
-    def __init__(self, in_channels: int, hidden_channels: int, out_channels: int, num_layers: int, aggr_func, dropout_rate: float = 0.5, **kwargs):
+    def __init__(self, in_channels, hidden_channels, out_channels, 
+                 num_layers, aggr_func, heads=4, dropout_rate=0.5, **kwargs):
         super().__init__()
         self.dropout_rate = dropout_rate
         self.convs = nn.ModuleList()
 
-        self.convs.append(GATv2GPConv(in_channels, hidden_channels, aggr_func))
+        self.convs.append(
+            GATv2GPConv(in_channels, hidden_channels, heads, aggr_func, concat=True))
+        
         for _ in range(num_layers - 2):
-            self.convs.append(GATv2GPConv(hidden_channels, hidden_channels, aggr_func))
-        self.convs.append(GATv2GPConv(hidden_channels, out_channels, aggr_func))
+            self.convs.append(
+                GATv2GPConv(hidden_channels * heads, hidden_channels, heads, aggr_func, concat=True))
+        
+        self.convs.append(
+            GATv2GPConv(hidden_channels * heads, out_channels, heads, aggr_func, concat=False))
 
-    def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+    def forward(self, x, edge_index):
         for i, conv in enumerate(self.convs):
             x = F.dropout(x, p=self.dropout_rate, training=self.training)
             x = conv(x, edge_index)
             if i < len(self.convs) - 1:
                 x = F.elu(x)
-                
         return F.log_softmax(x, dim=1)

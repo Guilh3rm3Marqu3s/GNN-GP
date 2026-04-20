@@ -121,7 +121,8 @@ class GIN(nn.Module):
                 x = F.relu(x)
                 x = F.dropout(x, p=self.dropout_rate, training=self.training)
                 
-        return self.lin(x)
+        return F.log_softmax(self.lin(x), dim=1)
+
     
         
 class GATv2Conv(MessagePassing):
@@ -147,6 +148,7 @@ class GATv2Conv(MessagePassing):
     
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
         H, C = self.heads, self.out_channels
+        edge_index, _ = add_self_loops(edge_index, num_nodes=x.size(0))
         
         x_l = self.lin_l(x).view(-1, H, C)
         x_r = self.lin_r(x).view(-1, H, C)
